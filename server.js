@@ -2,6 +2,92 @@
 
 const express = require('express');
 const { createProxyMiddleware, responseInterceptor } = require('http-proxy-middleware');
+const { randomBytes } = require('node:crypto');
+
+const proxyClientScript = `(() => {
+  const script = document.currentScript;
+  if (!script) return;
+  const proxyOrigin = new URL(script.src).origin;
+  const targetOrigin = script.dataset.targetOrigin;
+  const proxyHome = '/?home=1';
+  const proxyEndpoint = '/proxy?url=';
+
+  function upstreamUrl(value) {
+    let destination;
+    try { destination = new URL(value, document.baseURI); } catch { return null; }
+    if (destination.protocol !== 'http:' && destination.protocol !== 'https:') return null;
+    if (destination.origin === proxyOrigin) {
+      if (destination.pathname === '/__proxy/client.js') return null;
+      if (destination.pathname === '/proxy' && destination.searchParams.has('url')) return null;
+      destination = new URL(destination.pathname + destination.search + destination.hash, targetOrigin);
+    }
+    return destination;
+  }
+
+  function proxyUrl(destination) {
+    return proxyEndpoint + encodeURIComponent(destination.href);
+  }
+
+  function rewriteLink(anchor) {
+    if (anchor.hasAttribute('data-proxy-home') || anchor.hasAttribute('download')) return;
+    const raw = anchor.getAttribute('href');
+    if (!raw || raw[0] === '#' || /^\s*(?:javascript|mailto|tel|data):/i.test(raw)) return;
+    const destination = upstreamUrl(raw);
+    if (destination) {
+      const proxied = proxyUrl(destination);
+      if (raw !== proxied) anchor.setAttribute('href', proxied);
+    }
+  }
+
+  function rewriteForm(form) {
+    if (!(form instanceof HTMLFormElement) || (form.method || 'get').toLowerCase() === 'dialog') return;
+    const destination = upstreamUrl(form.getAttribute('action') || location.href);
+    if (destination) form.setAttribute('action', proxyUrl(destination));
+  }
+
+  document.querySelectorAll('a[href]').forEach(rewriteLink);
+  document.querySelectorAll('form').forEach(rewriteForm);
+  new MutationObserver((records) => {
+    for (const record of records) {
+      if (record.type === 'attributes') {
+        if (record.target.matches('a[href]')) rewriteLink(record.target);
+        if (record.target.matches('form')) rewriteForm(record.target);
+      }
+      for (const node of record.addedNodes) {
+        if (!(node instanceof Element)) continue;
+        if (node.matches('a[href]')) rewriteLink(node);
+        if (node.matches('form')) rewriteForm(node);
+        node.querySelectorAll('a[href]').forEach(rewriteLink);
+        node.querySelectorAll('form').forEach(rewriteForm);
+      }
+    }
+  }).observe(document.documentElement, { subtree: true, childList: true, attributes: true, attributeFilter: ['href', 'action'] });
+
+  document.addEventListener('click', (event) => {
+    const anchor = event.target instanceof Element && event.target.closest('a[href]');
+    if (anchor) rewriteLink(anchor);
+  }, true);
+  document.addEventListener('submit', (event) => {
+    if (event.target instanceof HTMLFormElement) rewriteForm(event.target);
+  }, true);
+
+  const style = document.createElement('style');
+  if (script.nonce) style.nonce = script.nonce;
+  style.textContent = '#private-proxy-home{position:fixed;z-index:2147483647;top:12px;right:12px;padding:10px 14px;border:1px solid #ffffff38;border-radius:999px;background:#171923;color:#fff;font:600 14px/1.2 system-ui,sans-serif;text-decoration:none;box-shadow:0 4px 20px #0006}#private-proxy-home:hover{background:#303346}@media(max-width:480px){#private-proxy-home{top:8px;right:8px;padding:9px 12px;font-size:12px}}';
+  (document.head || document.documentElement).appendChild(style);
+  const home = document.createElement('a');
+  home.id = 'private-proxy-home';
+  home.href = proxyHome;
+  home.dataset.proxyHome = 'true';
+  home.textContent = 'Back to Main Proxy Page';
+  home.setAttribute('aria-label', 'Back to Main Proxy Page');
+  if (document.body) document.body.appendChild(home);
+  else document.addEventListener('DOMContentLoaded', () => document.body.appendChild(home), { once: true });
+
+  if (script.dataset.currentPath) {
+    try { history.replaceState(history.state, '', script.dataset.currentPath); } catch { /* Keep the proxy dispatch URL if history is restricted. */ }
+  }
+})();`;
 
 function configuration(environment = process.env) {
   const rawTarget = environment.TARGET_URL || 'https://vitalitygames.com';
@@ -138,6 +224,38 @@ function rewriteSetCookies(cookies) {
     `${cookie.replace(/;\s*Domain=[^;]*/i, '').replace(/;\s*Path=[^;]*/i, '')}; Path=/`);
 }
 
+function appendCspNonce(policy, candidates, nonce) {
+  if (typeof policy !== 'string' || !nonce) return policy;
+  const directives = policy.split(';').map((item) => item.trim()).filter(Boolean);
+  const selected = candidates.find((name) => directives.some((item) => item.split(/\s+/, 1)[0].toLowerCase() === name));
+  if (!selected) return policy;
+  const index = directives.findIndex((item) => item.split(/\s+/, 1)[0].toLowerCase() === selected);
+  if (!directives[index].includes(`'nonce-${nonce}'`)) directives[index] += ` 'nonce-${nonce}'`;
+  return directives.join('; ');
+}
+
+function constrainBaseToProxy(policy) {
+  if (typeof policy !== 'string') return policy;
+  const directives = policy.split(';').map((item) => item.trim()).filter(Boolean);
+  const index = directives.findIndex((item) => item.split(/\s+/, 1)[0].toLowerCase() === 'base-uri');
+  if (index === -1) directives.push("base-uri 'self'");
+  else directives[index] = "base-uri 'self'";
+  return directives.join('; ');
+}
+
+function escapeHtmlAttribute(value) {
+  return String(value).replaceAll('&', '&amp;').replaceAll('"', '&quot;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
+}
+
+function injectProxyClient(html, { proxyOrigin, targetOrigin, nonce, currentPath }) {
+  const script = `<script src="${escapeHtmlAttribute(proxyOrigin)}/__proxy/client.js" data-target-origin="${escapeHtmlAttribute(targetOrigin)}"${currentPath ? ` data-current-path="${escapeHtmlAttribute(currentPath)}"` : ''}${nonce ? ` nonce="${escapeHtmlAttribute(nonce)}"` : ''}></script>`;
+  const base = currentPath ? `<base href="${escapeHtmlAttribute(proxyOrigin + currentPath)}">` : '';
+  const injection = base + script;
+  if (/<head\b[^>]*>/i.test(html)) return html.replace(/<head\b[^>]*>/i, (head) => head + injection);
+  if (/<html\b[^>]*>/i.test(html)) return html.replace(/<html\b[^>]*>/i, (opening) => opening + '<head>' + injection + '</head>');
+  return '<head>' + injection + '</head>' + html;
+}
+
 function createApp({ target, allowedOrigins = [target] }) {
   const app = express();
   app.disable('x-powered-by');
@@ -145,6 +263,9 @@ function createApp({ target, allowedOrigins = [target] }) {
   const defaultOrigin = new URL(target).origin;
 
   app.get('/healthz', (_request, response) => response.status(200).type('text').send('ok'));
+  app.get('/__proxy/client.js', (_request, response) => {
+    response.set('Cache-Control', 'no-store').type('application/javascript').send(proxyClientScript);
+  });
 
   app.use((request, _response, next) => {
     // Ignore legacy proxy credentials instead of forwarding them upstream.
@@ -160,16 +281,24 @@ function createApp({ target, allowedOrigins = [target] }) {
   // The launcher is shown on the first visit. After selecting an approved origin,
   // a per-browser cookie keeps that origin active for relative links and assets.
   app.get('/', (request, response, next) => {
+    if (request.query.home === '1') {
+      response.clearCookie('proxy_origin', {
+        path: '/',
+        sameSite: 'lax',
+        secure: process.env.NODE_ENV === 'production'
+      });
+      return showLandingPage(request, response);
+    }
     request.proxyOrigin = readProxyOrigin(request, allowed);
     if (request.proxyOrigin) return next();
     showLandingPage(request, response);
   });
   app.get('/home', showLandingPage);
 
-  app.get('/proxy', (request, response) => {
-    const rawDestination = new URL(request.originalUrl, 'http://proxy.local').searchParams.get('url');
+  function parseDestination(rawDestination, response) {
     if (!rawDestination) {
-      return response.status(400).type('text').send('Enter a website address, then try again.');
+      response.status(400).type('text').send('Enter a website address, then try again.');
+      return null;
     }
 
     let destination;
@@ -177,12 +306,34 @@ function createApp({ target, allowedOrigins = [target] }) {
       const candidate = /^[a-z][a-z0-9+.-]*:/i.test(rawDestination) ? rawDestination : `https://${rawDestination}`;
       destination = new URL(candidate);
     } catch {
-      return response.status(400).type('text').send('Enter a valid website address.');
+      response.status(400).type('text').send('Enter a valid website address.');
+      return null;
     }
     const localHttpOrigin = process.env.NODE_ENV !== 'production' && destination.protocol === 'http:' &&
       ['localhost', '127.0.0.1', '[::1]'].includes(destination.hostname);
     if ((destination.protocol !== 'https:' && !localHttpOrigin) || destination.username || destination.password || !allowed.has(destination.origin)) {
-      return response.status(403).type('text').send('This HTTPS site is not enabled for this proxy. Ask the proxy owner to add its origin to the approved list.');
+      response.status(403).type('text').send('This HTTPS site is not enabled for this proxy. Ask the proxy owner to add its origin to the approved list.');
+      return null;
+    }
+    return destination;
+  }
+
+  function addProxyOriginCookie(request, destination) {
+    const secure = process.env.NODE_ENV === 'production';
+    request.proxySelectionCookie = `proxy_origin=${encodeURIComponent(destination.origin)}; Max-Age=86400; Path=/; HttpOnly; SameSite=Lax${secure ? '; Secure' : ''}`;
+  }
+
+  app.get('/proxy', (request, response) => {
+    const params = new URL(request.originalUrl, 'http://proxy.local').searchParams;
+    const destination = parseDestination(params.get('url'), response);
+    if (!destination) return;
+    let skippedRouteParameter = false;
+    for (const [key, value] of params) {
+      if (key === 'url' && !skippedRouteParameter) {
+        skippedRouteParameter = true;
+        continue;
+      }
+      destination.searchParams.append(key, value);
     }
 
     response.cookie('proxy_origin', destination.origin, {
@@ -193,6 +344,17 @@ function createApp({ target, allowedOrigins = [target] }) {
       secure: process.env.NODE_ENV === 'production'
     });
     response.redirect(303, `${destination.pathname}${destination.search}${destination.hash}`);
+  });
+
+  app.post('/proxy', (request, response, next) => {
+    const params = new URL(request.originalUrl, 'http://proxy.local').searchParams;
+    const destination = parseDestination(params.get('url'), response);
+    if (!destination) return;
+    request.proxyOrigin = destination.origin;
+    request.proxyDispatchDestination = destination;
+    request.url = destination.pathname + destination.search;
+    addProxyOriginCookie(request, destination);
+    next();
   });
 
   // Relative links and form actions stay on the selected origin. Rewrite absolute
@@ -233,9 +395,30 @@ function createApp({ target, allowedOrigins = [target] }) {
         }
       } catch { /* Leave an invalid upstream Location untouched. */ }
     }
+    if (request.proxySelectionCookie) {
+      const upstreamCookies = proxyResponse.headers['set-cookie'];
+      proxyResponse.headers['set-cookie'] = [
+        ...(Array.isArray(upstreamCookies) ? upstreamCookies : upstreamCookies ? [upstreamCookies] : []),
+        request.proxySelectionCookie
+      ];
+    }
+    if ((proxyResponse.headers['content-type'] || '').toLowerCase().includes('text/html')) {
+      request.proxyUiNonce = randomBytes(18).toString('base64');
+    }
     for (const header of ['content-security-policy', 'content-security-policy-report-only']) {
       if (proxyResponse.headers[header]) {
-        proxyResponse.headers[header] = rewriteTargetReferences(proxyResponse.headers[header], targetOrigin, browserOrigin);
+        const wasArray = Array.isArray(proxyResponse.headers[header]);
+        const policies = wasArray ? proxyResponse.headers[header] : [proxyResponse.headers[header]];
+        const rewrittenPolicies = policies.map((policy) => {
+          let rewritten = rewriteTargetReferences(policy, targetOrigin, browserOrigin);
+          if (request.proxyUiNonce) {
+            rewritten = appendCspNonce(rewritten, ['script-src-elem', 'script-src', 'default-src'], request.proxyUiNonce);
+            rewritten = appendCspNonce(rewritten, ['style-src-elem', 'style-src', 'default-src'], request.proxyUiNonce);
+          }
+          if (request.proxyDispatchDestination) rewritten = constrainBaseToProxy(rewritten);
+          return rewritten;
+        });
+        proxyResponse.headers[header] = wasArray ? rewrittenPolicies : rewrittenPolicies[0];
       }
     }
   }
@@ -269,7 +452,16 @@ function createApp({ target, allowedOrigins = [target] }) {
         /charset=(?!utf-8\b)/i.test(contentType)) return buffer;
     response.removeHeader('etag');
     response.removeHeader('content-md5');
-    return rewriteTargetReferences(buffer.toString('utf8'), selectedOrigin(request), publicOrigin(request));
+    const rewritten = rewriteTargetReferences(buffer.toString('utf8'), selectedOrigin(request), publicOrigin(request));
+    if (!/^text\/html\b/i.test(contentType)) return rewritten;
+    const dispatch = request.proxyDispatchDestination;
+    const currentPath = dispatch ? dispatch.pathname + dispatch.search + dispatch.hash : '';
+    return injectProxyClient(rewritten, {
+      proxyOrigin: publicOrigin(request),
+      targetOrigin: selectedOrigin(request),
+      nonce: request.proxyUiNonce,
+      currentPath
+    });
   });
   const rewritingProxy = createProxyMiddleware({
     ...proxyOptions,

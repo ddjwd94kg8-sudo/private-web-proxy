@@ -59,6 +59,11 @@ test('shows a launcher, proxies only approved origins for a browser session, and
     assert.equal(selectedHome.status, 200);
     assert.deepEqual(await selectedHome.json(), { name: 'second', method: 'GET', url: '/', body: '', key: null });
 
+    const dashboard = await fetch(`${proxyUrl}/?home=1`, { headers: { Cookie: proxyCookie } });
+    assert.equal(dashboard.status, 200);
+    assert.match(await dashboard.text(), /Browse the web/);
+    assert.match(dashboard.headers.get('set-cookie'), /proxy_origin=;/);
+
     const response = await fetch(`${proxyUrl}/v1/item?part=two`, {
       method: 'POST',
       headers: { Cookie: proxyCookie, 'X-Proxy-Key': 'legacy-value', 'Content-Type': 'text/plain' },
@@ -70,6 +75,13 @@ test('shows a launcher, proxies only approved origins for a browser session, and
     const blocked = await fetch(`${proxyUrl}/proxy?url=${encodeURIComponent('https://not-approved.example/')}`, { redirect: 'manual' });
     assert.equal(blocked.status, 403);
     assert.match(await blocked.text(), /not enabled/);
+
+    const blockedPost = await fetch(`${proxyUrl}/proxy?url=${encodeURIComponent('https://not-approved.example/submit')}`, {
+      method: 'POST',
+      headers: { Cookie: proxyCookie, 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: 'q=blocked'
+    });
+    assert.equal(blockedPost.status, 403);
 
     const invalid = await fetch(`${proxyUrl}/proxy?url=${encodeURIComponent('http://127.0.0.1:22/')}`, { redirect: 'manual' });
     assert.equal(invalid.status, 403);

@@ -2,6 +2,7 @@
 
 const assert = require('node:assert/strict');
 const http = require('node:http');
+const vm = require('node:vm');
 const { test } = require('node:test');
 const { createApp } = require('./server');
 
@@ -36,6 +37,12 @@ test('search forms, scripts, redirects, and cookies stay on the selected origin'
     if (request.method === 'POST') {
       const chunks = [];
       for await (const chunk of request) chunks.push(chunk);
+      if (request.url.startsWith('/post-result')) {
+        response.setHeader('Content-Type', 'text/html; charset=utf-8');
+        response.setHeader('Content-Security-Policy', "default-src 'self'");
+        response.end('<!doctype html><html><head><title>Submitted</title></head><body>done</body></html>');
+        return;
+      }
       response.setHeader('Content-Type', 'application/json');
       response.end(JSON.stringify({
         method: request.method,
@@ -69,18 +76,30 @@ test('search forms, scripts, redirects, and cookies stay on the selected origin'
     const html = await homepage.text();
     assert.equal(homepage.status, 200);
     assert.ok(html.includes('action="' + proxyUrl + '/"'));
+    assert.ok(html.includes('<script src="' + proxyUrl + '/__proxy/client.js"'));
     assert.ok(html.includes('src="' + proxyUrl + '/script.js"'));
     assert.ok(html.includes('window.location.href = "' + proxyUrl + '/results"'));
     assert.ok(html.includes('action="//' + new URL(proxyUrl).host + '/search"'));
     assert.ok(html.includes(upstreamUrl.replace('http:', 'https:') + '/different'));
     assert.ok(html.includes('https://not-approved.example/'));
-    assert.ok(!html.includes(upstreamUrl));
-    assert.equal(homepage.headers.get('content-security-policy'), 'form-action ' + proxyUrl + "; script-src 'self' " + proxyUrl);
+    assert.ok(!html.replace('data-target-origin="' + upstreamUrl + '"', '').includes(upstreamUrl));
+    const csp = homepage.headers.get('content-security-policy');
+    const nonce = html.match(/<script[^>]+nonce="([^"]+)"/)[1];
+    assert.ok(csp.includes('form-action ' + proxyUrl));
+    assert.ok(csp.includes("'nonce-" + nonce + "'"));
+    assert.ok(html.includes('data-target-origin="' + upstreamUrl + '"'));
     assert.match(homepage.headers.get('set-cookie'), /session=abc; HttpOnly; Path=\//);
     assert.doesNotMatch(homepage.headers.get('set-cookie'), /Domain=/i);
 
     const getSearch = await fetch(proxyUrl + '/?q=retro+games', { headers: { Cookie: proxyCookie, Accept: 'text/html' } });
     assert.ok((await getSearch.text()).includes('<p>/?q=retro+games</p>'));
+
+    const getForm = await fetch(proxyUrl + '/proxy?url=' + encodeURIComponent(upstreamUrl + '/search') + '&q=retro+games', {
+      headers: { Cookie: proxyCookie },
+      redirect: 'manual'
+    });
+    assert.equal(getForm.status, 303);
+    assert.equal(getForm.headers.get('location'), '/search?q=retro+games');
 
     const postSearch = await fetch(proxyUrl, {
       method: 'POST',
@@ -100,6 +119,45 @@ test('search forms, scripts, redirects, and cookies stay on the selected origin'
       referer: upstreamUrl + '/?q=old',
       cookie: 'session=abc'
     });
+
+    const crossOriginPost = await fetch(proxyUrl + '/proxy?url=' + encodeURIComponent(upstreamUrl + '/submit?mode=quick'), {
+      method: 'POST',
+      headers: {
+        Cookie: proxyCookie + '; session=abc',
+        Origin: proxyUrl,
+        Referer: proxyUrl + '/search',
+        'Content-Type': 'application/x-www-form-urlencoded'
+      },
+      body: 'q=retro+games&ia=web'
+    });
+    assert.deepEqual(await crossOriginPost.json(), {
+      method: 'POST',
+      url: '/submit?mode=quick',
+      body: 'q=retro+games&ia=web',
+      origin: upstreamUrl,
+      referer: upstreamUrl + '/search',
+      cookie: 'session=abc'
+    });
+    assert.match(crossOriginPost.headers.get('set-cookie'), /proxy_origin=/);
+
+    const postDocument = await fetch(proxyUrl + '/proxy?url=' + encodeURIComponent(upstreamUrl + '/post-result?return=1'), {
+      method: 'POST',
+      headers: { Cookie: proxyCookie, Accept: 'text/html', 'Sec-Fetch-Dest': 'document', 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: 'q=retro+games'
+    });
+    const postHtml = await postDocument.text();
+    assert.ok(postHtml.includes('<base href="' + proxyUrl + '/post-result?return=1">'));
+    assert.ok(postHtml.includes('data-current-path="/post-result?return=1"'));
+    assert.ok(postDocument.headers.get('content-security-policy').includes("base-uri 'self'"));
+
+    const clientScript = await fetch(proxyUrl + '/__proxy/client.js');
+    const clientText = await clientScript.text();
+    assert.equal(clientScript.status, 200);
+    assert.ok(clientText.includes("document.addEventListener('click'"));
+    assert.ok(clientText.includes("document.addEventListener('submit'"));
+    assert.ok(clientText.includes('Back to Main Proxy Page'));
+    assert.ok(clientText.includes("const proxyHome = '/?home=1'"));
+    assert.doesNotThrow(() => new vm.Script(clientText));
 
     const script = await fetch(proxyUrl + '/script.js', {
       headers: { Cookie: proxyCookie, 'Sec-Fetch-Dest': 'script' }
