@@ -47,7 +47,7 @@ function configuration(environment = process.env) {
 }
 
 const landingPage = `<!doctype html>
-<html lang="en">
+<html lang="en"
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -86,7 +86,7 @@ const landingPage = `<!doctype html>
       const field = document.getElementById('url');
       const value = field.value.trim();
       try {
-        const address = /^[a-z][a-z0-9+.-]*:\/\//i.test(value) ? value : 'https://' + value;
+const address = value.includes('://') ? value : 'https://' + value;
         const parsed = new URL(address);
         if (parsed.protocol !== 'https:' || !parsed.hostname || parsed.username || parsed.password) throw new Error();
         field.value = parsed.href;
