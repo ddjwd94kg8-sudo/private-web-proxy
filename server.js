@@ -21,7 +21,7 @@ function configuration(environment = process.env) {
     throw new Error('TARGET_URL must use HTTPS (local HTTP is allowed only outside production)');
   }
 
-  const allowedOrigins = new Set([target.origin]);
+  const allowedOrigins = new Set([target.origin, 'https://duckduckgo.com']);
   for (const value of (environment.PROXY_ALLOWED_ORIGINS || '').split(',')) {
     const candidate = value.trim();
     if (!candidate) continue;
