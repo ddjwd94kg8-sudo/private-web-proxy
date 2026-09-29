@@ -1,14 +1,10 @@
 'use strict';
 
-const { createHash, createHmac, timingSafeEqual } = require('node:crypto');
 const express = require('express');
 const { createProxyMiddleware } = require('http-proxy-middleware');
 
 function configuration(environment = process.env) {
-  const rawTarget = environment.TARGET_URL;
-  const token = environment.PROXY_TOKEN;
-  if (!rawTarget) throw new Error('TARGET_URL is required');
-  if (!token || token.length < 24) throw new Error('PROXY_TOKEN must be at least 24 characters');
+  const rawTarget = environment.TARGET_URL || 'https://vitalitygames.com';
 
   let target;
   try {
@@ -27,78 +23,22 @@ function configuration(environment = process.env) {
 
   const port = Number(environment.PORT || 3000);
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('PORT must be 1–65535');
-  return { target: target.origin, token, port };
+  return { target: target.origin, port };
 }
 
-function createApp({ target, token }) {
+function createApp({ target }) {
   const app = express();
   app.disable('x-powered-by');
   app.get('/healthz', (_request, response) => response.status(200).type('text').send('ok'));
 
-  const expectedHash = createHash('sha256').update(token, 'utf8').digest();
-  const cookieName = 'proxy_session';
-  const sessionLifetime = 12 * 60 * 60;
-  const matchesToken = (supplied) => timingSafeEqual(
-    expectedHash, createHash('sha256').update(supplied, 'utf8').digest()
-  );
-  const signature = (expiry) => createHmac('sha256', token).update(`proxy-session:${expiry}`).digest('hex');
-  const sessionCookie = () => {
-    const expiry = Math.floor(Date.now() / 1000) + sessionLifetime;
-    return `${cookieName}=${expiry}.${signature(expiry)}; Max-Age=${sessionLifetime}; Path=/; HttpOnly; Secure; SameSite=Lax`;
-  };
-  const hasSession = (request) => {
-    const value = request.headers.cookie?.split(';').map((part) => part.trim())
-      .find((part) => part.startsWith(`${cookieName}=`))?.slice(cookieName.length + 1);
-    const match = /^(\d{10})\.([a-f0-9]{64})$/.exec(value || '');
-    if (!match || Number(match[1]) <= Math.floor(Date.now() / 1000)) return false;
-    return timingSafeEqual(Buffer.from(match[2], 'hex'), Buffer.from(signature(match[1]), 'hex'));
-  };
-
-  // Exchange a one-time URL token for an HttpOnly cookie before contacting the upstream.
-  // A form at /login also lets users avoid putting the token in browser history.
-  app.get('/login', (_request, response) => response.type('html').send(`<!doctype html>
-<html lang="en"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Proxy sign in</title><form method="post" action="/login">
-<label>Passkey <input name="token" type="password" required autocomplete="off"></label>
-<button type="submit">Open site</button></form></html>`));
-  app.post('/login', express.urlencoded({ extended: false, limit: '1kb' }), (request, response) => {
-    response.set('Cache-Control', 'no-store');
-    if (typeof request.body.token !== 'string' || !matchesToken(request.body.token)) {
-      return response.status(401).type('text').send('Invalid passkey');
-    }
-    response.set('Set-Cookie', sessionCookie());
-    return response.redirect(303, '/');
-  });
-
-  app.use((request, response, next) => {
-    const url = new URL(request.originalUrl, 'http://localhost');
-    if (request.method === 'GET' && url.searchParams.has('token')) {
-      response.set('Cache-Control', 'no-store');
-      response.set('Referrer-Policy', 'no-referrer');
-      if (!matchesToken(url.searchParams.get('token') || '')) {
-        return response.status(401).type('text').send('Invalid passkey');
-      }
-      response.set('Set-Cookie', sessionCookie());
-      url.searchParams.delete('token');
-      return response.redirect(303, `${url.pathname}${url.search}`);
-    }
-    const supplied = request.get('x-proxy-key') || '';
-    if (!matchesToken(supplied) && !hasSession(request)) {
-      return response.status(401).json({ error: 'Unauthorized' });
-    }
-    // The proxy key authenticates this hop only. Do not send it to the target.
+  app.use((request, _response, next) => {
+    // Ignore legacy proxy credentials instead of forwarding them upstream.
     delete request.headers['x-proxy-key'];
-    // Do not leak the proxy's authentication cookie to the upstream.
-    if (request.headers.cookie) {
-      const otherCookies = request.headers.cookie.split(';').map((part) => part.trim())
-        .filter((part) => part && !part.startsWith(`${cookieName}=`));
-      if (otherCookies.length) request.headers.cookie = otherCookies.join('; ');
-      else delete request.headers.cookie;
-    }
     next();
   });
 
-  app.use(createProxyMiddleware({
+  // Mount the fixed upstream at the site root so / renders its homepage by default.
+  app.use('/', createProxyMiddleware({
     target,
     changeOrigin: true,
     secure: true,
