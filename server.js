@@ -1,7 +1,7 @@
 'use strict';
 
 const express = require('express');
-const { createProxyMiddleware } = require('http-proxy-middleware');
+const { createProxyMiddleware, responseInterceptor } = require('http-proxy-middleware');
 
 function configuration(environment = process.env) {
   const rawTarget = environment.TARGET_URL || 'https://vitalitygames.com';
@@ -113,6 +113,31 @@ function readProxyOrigin(request, allowedOrigins) {
   }
 }
 
+function publicOrigin(request) {
+  const forwardedProtocol = String(request.headers['x-forwarded-proto'] || '').split(',')[0].trim();
+  const protocol = forwardedProtocol === 'https' || request.socket.encrypted ? 'https:' : 'http:';
+  return new URL(`${protocol}//${request.headers.host}`).origin;
+}
+
+function rewriteTargetReferences(value, targetOrigin, proxyOrigin) {
+  const escape = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const boundary = '(?=$|[^A-Za-z0-9._:-])';
+  const targetHost = new URL(targetOrigin).host;
+  const proxyHost = new URL(proxyOrigin).host;
+  const escapedTarget = targetOrigin.replaceAll('/', '\\/');
+  const escapedProxy = proxyOrigin.replaceAll('/', '\\/');
+  return value
+    .replace(new RegExp(escape(escapedTarget) + boundary, 'g'), escapedProxy)
+    .replace(new RegExp(`${escape(targetOrigin)}${boundary}`, 'g'), proxyOrigin)
+    .replace(new RegExp(`(?<!:)//${escape(targetHost)}${boundary}`, 'g'), `//${proxyHost}`);
+}
+
+function rewriteSetCookies(cookies) {
+  if (!cookies) return cookies;
+  return (Array.isArray(cookies) ? cookies : [cookies]).map((cookie) =>
+    `${cookie.replace(/;\s*Domain=[^;]*/i, '').replace(/;\s*Path=[^;]*/i, '')}; Path=/`);
+}
+
 function createApp({ target, allowedOrigins = [target] }) {
   const app = express();
   app.disable('x-powered-by');
@@ -170,16 +195,61 @@ function createApp({ target, allowedOrigins = [target] }) {
     response.redirect(303, `${destination.pathname}${destination.search}${destination.hash}`);
   });
 
-  // Requests stay on the selected allowlisted origin for this browser session.
-  app.use('/', createProxyMiddleware({
+  // Relative links and form actions stay on the selected origin. Rewrite absolute
+  // references in document/script responses, while other assets keep streaming.
+  function selectedOrigin(request) {
+    return request.proxyOrigin || readProxyOrigin(request, allowed) || defaultOrigin;
+  }
+
+  function onProxyRequest(proxyRequest, request) {
+    const targetOrigin = selectedOrigin(request);
+    const cookies = (request.headers.cookie || '').split(';').map((cookie) => cookie.trim())
+      .filter((cookie) => cookie && !cookie.startsWith('proxy_origin='));
+    if (cookies.length) proxyRequest.setHeader('cookie', cookies.join('; '));
+    else proxyRequest.removeHeader('cookie');
+
+    const browserOrigin = publicOrigin(request);
+    if (request.headers.origin === browserOrigin) proxyRequest.setHeader('origin', targetOrigin);
+    if (request.headers.referer) {
+      try {
+        const referer = new URL(request.headers.referer);
+        if (referer.origin === browserOrigin) {
+          proxyRequest.setHeader('referer', targetOrigin + referer.pathname + referer.search);
+        }
+      } catch { /* Pass an invalid Referer through unchanged. */ }
+    }
+    if (request.rewriteTextResponse) proxyRequest.setHeader('accept-encoding', 'identity');
+  }
+
+  function onProxyResponse(proxyResponse, request) {
+    const targetOrigin = selectedOrigin(request);
+    const browserOrigin = publicOrigin(request);
+    const location = proxyResponse.headers.location;
+    if (location) {
+      try {
+        const destination = new URL(location, targetOrigin);
+        if (destination.origin === targetOrigin) {
+          proxyResponse.headers.location = browserOrigin + destination.pathname + destination.search + destination.hash;
+        }
+      } catch { /* Leave an invalid upstream Location untouched. */ }
+    }
+    for (const header of ['content-security-policy', 'content-security-policy-report-only']) {
+      if (proxyResponse.headers[header]) {
+        proxyResponse.headers[header] = rewriteTargetReferences(proxyResponse.headers[header], targetOrigin, browserOrigin);
+      }
+    }
+  }
+
+  const proxyOptions = {
     target,
-    router(request) {
-      return request.proxyOrigin || readProxyOrigin(request, allowed) || defaultOrigin;
-    },
+    router: selectedOrigin,
     changeOrigin: true,
     secure: true,
     cookieDomainRewrite: '',
+    cookiePathRewrite: '/',
     on: {
+      proxyReq: onProxyRequest,
+      proxyRes: onProxyResponse,
       error(error, _request, response) {
         console.error('Upstream proxy error:', error.message);
         if (response.headersSent) return response.destroy(error);
@@ -187,7 +257,38 @@ function createApp({ target, allowedOrigins = [target] }) {
         response.end(JSON.stringify({ error: 'Bad Gateway' }));
       }
     }
-  }));
+  };
+
+  const streamingProxy = createProxyMiddleware(proxyOptions);
+  const interceptText = responseInterceptor(async (buffer, upstream, request, response) => {
+    const cookies = rewriteSetCookies(upstream.headers['set-cookie']);
+    if (cookies) response.setHeader('set-cookie', cookies);
+    else response.removeHeader('set-cookie');
+    const contentType = upstream.headers['content-type'] || '';
+    if (!/^(text\/html|(?:application|text)\/(?:javascript|x-javascript))\b/i.test(contentType) ||
+        /charset=(?!utf-8\b)/i.test(contentType)) return buffer;
+    response.removeHeader('etag');
+    response.removeHeader('content-md5');
+    return rewriteTargetReferences(buffer.toString('utf8'), selectedOrigin(request), publicOrigin(request));
+  });
+  const rewritingProxy = createProxyMiddleware({
+    ...proxyOptions,
+    selfHandleResponse: true,
+    on: {
+      ...proxyOptions.on,
+      proxyRes(proxyResponse, request, response) {
+        onProxyResponse(proxyResponse, request);
+        return interceptText(proxyResponse, request, response);
+      }
+    }
+  });
+
+  app.use('/', (request, response, next) => {
+    const destination = request.headers['sec-fetch-dest'];
+    request.rewriteTextResponse = destination === 'document' || destination === 'script' ||
+      (request.headers.accept || '').includes('text/html');
+    return (request.rewriteTextResponse ? rewritingProxy : streamingProxy)(request, response, next);
+  });
   return app;
 }
 

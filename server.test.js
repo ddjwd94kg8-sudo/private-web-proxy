@@ -18,14 +18,14 @@ async function close(server) {
 test('defaults to Vitality Games and accepts only explicitly configured HTTPS origins in production', () => {
   const defaults = configuration({ NODE_ENV: 'production' });
   assert.equal(defaults.target, 'https://vitalitygames.com');
-  assert.deepEqual(defaults.allowedOrigins, ['https://vitalitygames.com']);
+  assert.deepEqual(defaults.allowedOrigins, ['https://vitalitygames.com', 'https://duckduckgo.com']);
   assert.throws(() => configuration({ NODE_ENV: 'production', TARGET_URL: 'http://example.com' }), /HTTPS/);
   assert.throws(() => configuration({ NODE_ENV: 'production', TARGET_URL: 'https://example.com/path' }), /origin/);
   assert.equal(configuration({ NODE_ENV: 'production', TARGET_URL: 'https://example.com' }).target, 'https://example.com');
   assert.deepEqual(configuration({
     NODE_ENV: 'production',
     PROXY_ALLOWED_ORIGINS: 'https://games.example, https://media.example/'
-  }).allowedOrigins, ['https://vitalitygames.com', 'https://games.example', 'https://media.example']);
+  }).allowedOrigins, ['https://vitalitygames.com', 'https://duckduckgo.com', 'https://games.example', 'https://media.example']);
   assert.throws(() => configuration({ NODE_ENV: 'production', PROXY_ALLOWED_ORIGINS: 'https://example.com/path' }), /PROXY_ALLOWED_ORIGINS/);
   assert.throws(() => configuration({ NODE_ENV: 'production', PROXY_ALLOWED_ORIGINS: 'http://example.com' }), /PROXY_ALLOWED_ORIGINS/);
 });
