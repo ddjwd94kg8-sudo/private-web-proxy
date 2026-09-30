@@ -57,12 +57,12 @@ test('search forms, scripts, redirects, and cookies stay on the selected origin'
     response.setHeader('Content-Type', 'text/html; charset=utf-8');
     response.setHeader('Content-Security-Policy', 'form-action ' + upstreamUrl + "; script-src 'self' " + upstreamUrl);
     response.setHeader('Set-Cookie', 'session=abc; Domain=127.0.0.1; Path=/results; HttpOnly');
-    response.end('<form action="' + upstreamUrl + '/" method="get"><input name="q"></form>' +
+    response.end('<!doctype html><html><head></head><body><form action="' + upstreamUrl + '/" method="get"><input name="q"></form>' +
       '<script src="' + upstreamUrl + '/script.js"></script>' +
       '<script>window.location.href = "' + upstreamUrl + '/results";</script>' +
       '<form action="//' + new URL(upstreamUrl).host + '/search" method="post"></form>' +
       '<a href="' + upstreamUrl.replace('http:', 'https:') + '/different">Other protocol</a>' +
-      '<a href="https://not-approved.example/">External</a><p>' + request.url + '</p>');
+      '<a href="https://not-approved.example/">External</a><p>' + request.url + '</p></body></html>');
   });
   upstreamUrl = await listen(upstream);
   const proxy = http.createServer(createApp({ target: upstreamUrl, allowedOrigins: [upstreamUrl] }));
@@ -76,18 +76,19 @@ test('search forms, scripts, redirects, and cookies stay on the selected origin'
     const html = await homepage.text();
     assert.equal(homepage.status, 200);
     assert.ok(html.includes('action="' + proxyUrl + '/"'));
-    assert.ok(html.includes('<script src="' + proxyUrl + '/__proxy/client.js"'));
+    const buttonPosition = html.indexOf('<a class="private-proxy-home" href="/?home=1">Back to Main Proxy Page</a>');
+    const closingBodyPosition = html.toLowerCase().lastIndexOf('</body>');
+    assert.ok(html.includes('<link rel="stylesheet" href="' + proxyUrl + '/__proxy/client.css">'));
+    assert.ok(html.includes('<script src="' + proxyUrl + '/__proxy/client.js"></script>'));
+    assert.ok(buttonPosition > -1 && buttonPosition < closingBodyPosition);
     assert.ok(html.includes('src="' + proxyUrl + '/script.js"'));
     assert.ok(html.includes('window.location.href = "' + proxyUrl + '/results"'));
     assert.ok(html.includes('action="//' + new URL(proxyUrl).host + '/search"'));
     assert.ok(html.includes(upstreamUrl.replace('http:', 'https:') + '/different'));
     assert.ok(html.includes('https://not-approved.example/'));
-    assert.ok(!html.replace('data-target-origin="' + upstreamUrl + '"', '').includes(upstreamUrl));
+    assert.ok(!html.includes(upstreamUrl));
     const csp = homepage.headers.get('content-security-policy');
-    const nonce = html.match(/<script[^>]+nonce="([^"]+)"/)[1];
-    assert.ok(csp.includes('form-action ' + proxyUrl));
-    assert.ok(csp.includes("'nonce-" + nonce + "'"));
-    assert.ok(html.includes('data-target-origin="' + upstreamUrl + '"'));
+    assert.equal(csp, 'form-action ' + proxyUrl + "; script-src 'self' " + proxyUrl);
     assert.match(homepage.headers.get('set-cookie'), /session=abc; HttpOnly; Path=\//);
     assert.doesNotMatch(homepage.headers.get('set-cookie'), /Domain=/i);
 
@@ -147,17 +148,49 @@ test('search forms, scripts, redirects, and cookies stay on the selected origin'
     });
     const postHtml = await postDocument.text();
     assert.ok(postHtml.includes('<base href="' + proxyUrl + '/post-result?return=1">'));
-    assert.ok(postHtml.includes('data-current-path="/post-result?return=1"'));
+    assert.ok(postHtml.includes('<a class="private-proxy-home" href="/?home=1">Back to Main Proxy Page</a>'));
     assert.ok(postDocument.headers.get('content-security-policy').includes("base-uri 'self'"));
 
     const clientScript = await fetch(proxyUrl + '/__proxy/client.js');
     const clientText = await clientScript.text();
     assert.equal(clientScript.status, 200);
-    assert.ok(clientText.includes("document.addEventListener('click'"));
-    assert.ok(clientText.includes("document.addEventListener('submit'"));
-    assert.ok(clientText.includes('Back to Main Proxy Page'));
-    assert.ok(clientText.includes("const proxyHome = '/?home=1'"));
+    assert.ok(clientText.includes("window.addEventListener('click'"));
+    assert.ok(clientText.includes("window.addEventListener('submit'"));
     assert.doesNotThrow(() => new vm.Script(clientText));
+
+    const listeners = {};
+    const fakeWindow = {
+      addEventListener: (name, callback) => { listeners[name] = callback; },
+      location: { origin: proxyUrl, href: proxyUrl + '/', assigned: '', assign(value) { this.assigned = value; } }
+    };
+    class FakeElement {
+      constructor(link) { this.link = link; }
+      closest() { return this.link; }
+    }
+    class FakeForm {
+      constructor(action) { this.action = action; }
+    }
+    vm.runInNewContext(clientText, { window: fakeWindow, Element: FakeElement, HTMLFormElement: FakeForm, URL, encodeURIComponent });
+    const fakeLink = {
+      getAttribute: () => upstreamUrl + '/outside',
+      hasAttribute: () => false,
+      href: upstreamUrl + '/outside',
+      target: ''
+    };
+    let prevented = false;
+    listeners.click({
+      target: new FakeElement(fakeLink), button: 0, metaKey: false, ctrlKey: false, shiftKey: false, altKey: false,
+      preventDefault() { prevented = true; }
+    });
+    assert.equal(prevented, true);
+    assert.equal(fakeWindow.location.assigned, '/proxy?url=' + encodeURIComponent(upstreamUrl + '/outside'));
+    const fakeForm = new FakeForm(upstreamUrl + '/submit');
+    listeners.submit({ target: fakeForm });
+    assert.equal(fakeForm.action, '/proxy?url=' + encodeURIComponent(upstreamUrl + '/submit'));
+
+    const clientCss = await fetch(proxyUrl + '/__proxy/client.css');
+    assert.equal(clientCss.status, 200);
+    assert.ok((await clientCss.text()).includes('position:fixed'));
 
     const script = await fetch(proxyUrl + '/script.js', {
       headers: { Cookie: proxyCookie, 'Sec-Fetch-Dest': 'script' }
