@@ -91,3 +91,47 @@ test('shows a launcher, proxies only approved origins for a browser session, and
     await close(secondUpstream);
   }
 });
+
+test('quick launch bookmarks route through the proxy and appear only for allowed origins', async () => {
+  const upstream = http.createServer((_request, response) => response.end('ok'));
+  const upstreamUrl = await listen(upstream);
+  const bookmarks = [
+    ['Cloud Gaming', 'GeForce NOW', 'https://geforcenow.com'],
+    ['Cloud Gaming', 'Xbox Cloud Gaming', 'https://xbox.com'],
+    ['Retro & Portals', 'GamePottys', 'https://gamepottys.com'],
+    ['Retro & Portals', 'CrazyGames', 'https://crazygames.com'],
+    ['Retro & Portals', 'Poki', 'https://poki.com'],
+    ['Search Engine', 'DuckDuckGo', 'https://duckduckgo.com']
+  ];
+  const proxy = http.createServer(createApp({
+    target: upstreamUrl,
+    allowedOrigins: [upstreamUrl, ...bookmarks.map(([, , url]) => url)]
+  }));
+  const proxyUrl = await listen(proxy);
+  try {
+    const homepage = await (await fetch(proxyUrl)).text();
+    for (const [category, label, url] of bookmarks) {
+      assert.ok(homepage.includes(`<section class="bookmark-group"><h3>${category}</h3>`));
+      assert.ok(homepage.includes(`<a class="bookmark-link" href="/proxy?url=${encodeURIComponent(url)}">${label}`));
+    }
+  } finally {
+    await close(proxy);
+  }
+
+  const limitedProxy = http.createServer(createApp({ target: upstreamUrl, allowedOrigins: [upstreamUrl, 'https://duckduckgo.com'] }));
+  const limitedProxyUrl = await listen(limitedProxy);
+  try {
+    const homepage = await (await fetch(limitedProxyUrl)).text();
+    assert.ok(homepage.includes('DuckDuckGo'));
+    assert.ok(!homepage.includes('GeForce NOW'));
+    assert.ok(!homepage.includes('Xbox Cloud Gaming'));
+    assert.ok(!homepage.includes('GamePottys'));
+    assert.ok(!homepage.includes('CrazyGames'));
+    assert.ok(!homepage.includes('Poki'));
+    assert.ok(!homepage.includes('Cloud Gaming'));
+    assert.ok(!homepage.includes('Retro &amp; Portals'));
+  } finally {
+    await close(limitedProxy);
+    await close(upstream);
+  }
+});

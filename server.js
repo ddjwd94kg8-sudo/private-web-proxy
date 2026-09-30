@@ -33,6 +33,43 @@ const proxyClientScript = `(() => {
 
 const proxyClientCss = '.private-proxy-home{position:fixed;z-index:2147483647;top:12px;right:12px;padding:10px 14px;border:1px solid #ffffff38;border-radius:999px;background:#171923;color:#fff;font:600 14px/1.2 system-ui,sans-serif;text-decoration:none;box-shadow:0 4px 20px #0006}.private-proxy-home:hover{background:#303346}@media(max-width:480px){.private-proxy-home{top:8px;right:8px;padding:9px 12px;font-size:12px}}';
 
+const quickLaunchGroups = [
+  {
+    title: 'Cloud Gaming',
+    bookmarks: [
+      { label: 'GeForce NOW', url: 'https://geforcenow.com' },
+      { label: 'Xbox Cloud Gaming', url: 'https://xbox.com' }
+    ]
+  },
+  {
+    title: 'Retro & Portals',
+    bookmarks: [
+      { label: 'GamePottys', url: 'https://gamepottys.com' },
+      { label: 'CrazyGames', url: 'https://crazygames.com' },
+      { label: 'Poki', url: 'https://poki.com' }
+    ]
+  },
+  {
+    title: 'Search Engine',
+    bookmarks: [
+      { label: 'DuckDuckGo', url: 'https://duckduckgo.com' }
+    ]
+  }
+];
+
+function renderQuickLaunchBookmarks(allowedOrigins) {
+  const allowed = new Set(allowedOrigins.map((origin) => new URL(origin).origin));
+  const groups = quickLaunchGroups.map(({ title, bookmarks }) => {
+    const links = bookmarks.filter(({ url }) => allowed.has(new URL(url).origin));
+    if (!links.length) return '';
+    return `<section class="bookmark-group"><h3>${title}</h3><div class="bookmark-grid">${links.map(({ label, url }) =>
+      `<a class="bookmark-link" href="/proxy?url=${encodeURIComponent(url)}">${label}<span aria-hidden="true">↗</span></a>`
+    ).join('')}</div></section>`;
+  }).join('');
+
+  return `<section class="quick-launch" aria-labelledby="quick-launch-heading"><h2 id="quick-launch-heading">Quick Launch Bookmarks</h2>${groups || '<p class="bookmark-empty">No quick-launch sites are enabled in this proxy yet.</p>'}</section>`;
+}
+
 function configuration(environment = process.env) {
   const rawTarget = environment.TARGET_URL || 'https://vitalitygames.com';
 
@@ -87,7 +124,7 @@ const landingPage = `<!doctype html>
     :root { color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
     * { box-sizing: border-box; }
     body { margin: 0; min-height: 100vh; display: grid; place-items: center; padding: 24px; color: #f4f5f7; background: radial-gradient(ellipse at 50% 35%, #202431 0, #111318 55%, #0b0c0f 100%); }
-    main { width: min(100%, 680px); text-align: center; }
+    main { width: min(100%, 760px); text-align: center; }
     .mark { width: 56px; height: 56px; display: grid; place-items: center; margin: 0 auto 22px; border: 1px solid #3c4252; border-radius: 18px; color: #c4a7ff; background: #1c1b27; font-size: 26px; }
     h1 { margin: 0; font-size: clamp(30px, 7vw, 44px); letter-spacing: -1.5px; }
     .intro { margin: 12px 0 30px; color: #a7abba; font-size: 16px; line-height: 1.6; }
@@ -97,6 +134,15 @@ const landingPage = `<!doctype html>
     button { border: 0; border-radius: 11px; padding: 0 24px; color: #17131f; background: #c4a7ff; font: inherit; font-weight: 700; cursor: pointer; }
     button:hover { background: #d2bdff; }
     .note { margin: 16px 6px 0; color: #838897; font-size: 13px; line-height: 1.6; }
+    .quick-launch { margin: 34px auto 0; text-align: left; }
+    .quick-launch > h2 { margin: 0 0 16px; color: #a7abba; font-size: 13px; font-weight: 700; letter-spacing: .12em; text-align: center; text-transform: uppercase; }
+    .bookmark-group { margin-top: 20px; }
+    .bookmark-group h3 { margin: 0 0 10px; color: #858a98; font-size: 12px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; }
+    .bookmark-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 210px), 1fr)); gap: 10px; }
+    .bookmark-link { display: flex; min-height: 48px; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 14px; border: 1px solid #343844; border-radius: 12px; color: #f4f5f7; background: #191b21; font-size: 14px; font-weight: 600; text-decoration: none; transition: border-color .15s ease, background .15s ease, transform .15s ease; }
+    .bookmark-link:hover { transform: translateY(-1px); border-color: #a985f6; background: #211f2a; }
+    .bookmark-link span { color: #c4a7ff; font-size: 18px; }
+    .bookmark-empty { margin: 0; color: #858a98; font-size: 13px; line-height: 1.6; text-align: center; }
     @media (max-width: 480px) { body { padding: 18px; } form { gap: 4px; padding: 6px; } input { padding: 12px 8px; font-size: 14px; } button { padding: 0 16px; } }
   </style>
 </head>
@@ -110,6 +156,7 @@ const landingPage = `<!doctype html>
       <button type="submit">Surf</button>
     </form>
     <p class="note">Only HTTPS sites approved by the proxy owner can be opened. Some sites may block proxy traffic or limit features.</p>
+    <!-- QUICK_LAUNCH_BOOKMARKS -->
   </main>
   <script>
     document.getElementById('surf-form').addEventListener('submit', function (event) {
@@ -130,6 +177,10 @@ const address = value.includes('://') ? value : 'https://' + value;
   </script>
 </body>
 </html>`;
+
+function renderLandingPage(allowedOrigins) {
+  return landingPage.replace('<!-- QUICK_LAUNCH_BOOKMARKS -->', renderQuickLaunchBookmarks(allowedOrigins));
+}
 
 function readProxyOrigin(request, allowedOrigins) {
   const cookies = request.headers.cookie || '';
@@ -214,7 +265,7 @@ function createApp({ target, allowedOrigins = [target] }) {
 
   function showLandingPage(_request, response) {
     response.set('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; form-action 'self'; base-uri 'none'");
-    response.type('html').send(landingPage);
+    response.type('html').send(renderLandingPage([...allowed]));
   }
 
   // The launcher is shown on the first visit. After selecting an approved origin,
