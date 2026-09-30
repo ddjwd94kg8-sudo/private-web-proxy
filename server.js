@@ -54,6 +54,13 @@ const quickLaunchGroups = [
       { label: 'CrazyGames', url: 'https://crazygames.com' },
       { label: 'Poki', url: 'https://poki.com' }
     ]
+  },
+  {
+    title: 'Media & Engines',
+    bookmarks: [
+      { label: 'YouTube Media Engine', url: 'https://youtube.com' },
+      { label: 'Equinox Core Engine', url: 'https://searchequinox.com' }
+    ]
   }
 ];
 
