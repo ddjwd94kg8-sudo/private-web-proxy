@@ -25,7 +25,9 @@ test('defaults to Vitality Games and the Quick Launch origins while accepting ad
     'https://xbox.com',
     'https://gamepottys.com',
     'https://crazygames.com',
-    'https://poki.com'
+    'https://poki.com',
+    'https://youtube.com',
+    'https://searchequinox.com'
   ]);
   assert.throws(() => configuration({ NODE_ENV: 'production', TARGET_URL: 'http://example.com' }), /HTTPS/);
   assert.throws(() => configuration({ NODE_ENV: 'production', TARGET_URL: 'https://example.com/path' }), /origin/);
@@ -41,6 +43,8 @@ test('defaults to Vitality Games and the Quick Launch origins while accepting ad
     'https://gamepottys.com',
     'https://crazygames.com',
     'https://poki.com',
+    'https://youtube.com',
+    'https://searchequinox.com',
     'https://games.example',
     'https://media.example'
   ]);
@@ -117,7 +121,9 @@ test('quick launch groups appear beneath DuckDuckGo and route through the proxy'
     ['Cloud Gaming', 'Xbox Cloud Gaming', 'https://xbox.com'],
     ['Retro & Portals', 'GamePottys', 'https://gamepottys.com'],
     ['Retro & Portals', 'CrazyGames', 'https://crazygames.com'],
-    ['Retro & Portals', 'Poki', 'https://poki.com']
+    ['Retro & Portals', 'Poki', 'https://poki.com'],
+    ['Media & Engines', 'YouTube Media Engine', 'https://youtube.com'],
+    ['Media & Engines', 'Equinox Core Engine', 'https://searchequinox.com']
   ];
   const proxy = http.createServer(createApp(configuration({ NODE_ENV: 'production' })));
   const proxyUrl = await listen(proxy);
@@ -131,6 +137,8 @@ test('quick launch groups appear beneath DuckDuckGo and route through the proxy'
     }
     assert.ok(homepage.indexOf('DuckDuckGo') < homepage.indexOf('GeForce NOW'));
     assert.ok(homepage.indexOf('Xbox Cloud Gaming') < homepage.indexOf('GamePottys'));
+    assert.ok(homepage.indexOf('Poki') < homepage.indexOf('YouTube Media Engine'));
+    assert.ok(homepage.indexOf('YouTube Media Engine') < homepage.indexOf('Equinox Core Engine'));
 
     const restrictedHomepage = await (await fetch(restrictedProxyUrl)).text();
     assert.ok(restrictedHomepage.includes('No quick-launch sites are enabled'));
