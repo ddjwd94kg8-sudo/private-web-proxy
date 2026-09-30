@@ -15,17 +15,35 @@ async function close(server) {
   await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
 }
 
-test('defaults to Vitality Games and accepts only explicitly configured HTTPS origins in production', () => {
+test('defaults to Vitality Games and the Quick Launch origins while accepting additional HTTPS origins', () => {
   const defaults = configuration({ NODE_ENV: 'production' });
   assert.equal(defaults.target, 'https://vitalitygames.com');
-  assert.deepEqual(defaults.allowedOrigins, ['https://vitalitygames.com', 'https://duckduckgo.com']);
+  assert.deepEqual(defaults.allowedOrigins, [
+    'https://vitalitygames.com',
+    'https://duckduckgo.com',
+    'https://geforcenow.com',
+    'https://xbox.com',
+    'https://gamepottys.com',
+    'https://crazygames.com',
+    'https://poki.com'
+  ]);
   assert.throws(() => configuration({ NODE_ENV: 'production', TARGET_URL: 'http://example.com' }), /HTTPS/);
   assert.throws(() => configuration({ NODE_ENV: 'production', TARGET_URL: 'https://example.com/path' }), /origin/);
   assert.equal(configuration({ NODE_ENV: 'production', TARGET_URL: 'https://example.com' }).target, 'https://example.com');
   assert.deepEqual(configuration({
     NODE_ENV: 'production',
     PROXY_ALLOWED_ORIGINS: 'https://games.example, https://media.example/'
-  }).allowedOrigins, ['https://vitalitygames.com', 'https://duckduckgo.com', 'https://games.example', 'https://media.example']);
+  }).allowedOrigins, [
+    'https://vitalitygames.com',
+    'https://duckduckgo.com',
+    'https://geforcenow.com',
+    'https://xbox.com',
+    'https://gamepottys.com',
+    'https://crazygames.com',
+    'https://poki.com',
+    'https://games.example',
+    'https://media.example'
+  ]);
   assert.throws(() => configuration({ NODE_ENV: 'production', PROXY_ALLOWED_ORIGINS: 'https://example.com/path' }), /PROXY_ALLOWED_ORIGINS/);
   assert.throws(() => configuration({ NODE_ENV: 'production', PROXY_ALLOWED_ORIGINS: 'http://example.com' }), /PROXY_ALLOWED_ORIGINS/);
 });
@@ -92,46 +110,33 @@ test('shows a launcher, proxies only approved origins for a browser session, and
   }
 });
 
-test('quick launch bookmarks route through the proxy and appear only for allowed origins', async () => {
-  const upstream = http.createServer((_request, response) => response.end('ok'));
-  const upstreamUrl = await listen(upstream);
+test('quick launch groups appear beneath DuckDuckGo and route through the proxy', async () => {
   const bookmarks = [
+    ['Search Engine', 'DuckDuckGo', 'https://duckduckgo.com'],
     ['Cloud Gaming', 'GeForce NOW', 'https://geforcenow.com'],
     ['Cloud Gaming', 'Xbox Cloud Gaming', 'https://xbox.com'],
     ['Retro & Portals', 'GamePottys', 'https://gamepottys.com'],
     ['Retro & Portals', 'CrazyGames', 'https://crazygames.com'],
-    ['Retro & Portals', 'Poki', 'https://poki.com'],
-    ['Search Engine', 'DuckDuckGo', 'https://duckduckgo.com']
+    ['Retro & Portals', 'Poki', 'https://poki.com']
   ];
-  const proxy = http.createServer(createApp({
-    target: upstreamUrl,
-    allowedOrigins: [upstreamUrl, ...bookmarks.map(([, , url]) => url)]
-  }));
+  const proxy = http.createServer(createApp(configuration({ NODE_ENV: 'production' })));
   const proxyUrl = await listen(proxy);
+  const restrictedProxy = http.createServer(createApp({ target: 'https://vitalitygames.com', allowedOrigins: ['https://vitalitygames.com'] }));
+  const restrictedProxyUrl = await listen(restrictedProxy);
   try {
     const homepage = await (await fetch(proxyUrl)).text();
     for (const [category, label, url] of bookmarks) {
       assert.ok(homepage.includes(`<section class="bookmark-group"><h3>${category}</h3>`));
       assert.ok(homepage.includes(`<a class="bookmark-link" href="/proxy?url=${encodeURIComponent(url)}">${label}`));
     }
+    assert.ok(homepage.indexOf('DuckDuckGo') < homepage.indexOf('GeForce NOW'));
+    assert.ok(homepage.indexOf('Xbox Cloud Gaming') < homepage.indexOf('GamePottys'));
+
+    const restrictedHomepage = await (await fetch(restrictedProxyUrl)).text();
+    assert.ok(restrictedHomepage.includes('No quick-launch sites are enabled'));
+    for (const [, label] of bookmarks) assert.ok(!restrictedHomepage.includes(label));
   } finally {
     await close(proxy);
-  }
-
-  const limitedProxy = http.createServer(createApp({ target: upstreamUrl, allowedOrigins: [upstreamUrl, 'https://duckduckgo.com'] }));
-  const limitedProxyUrl = await listen(limitedProxy);
-  try {
-    const homepage = await (await fetch(limitedProxyUrl)).text();
-    assert.ok(homepage.includes('DuckDuckGo'));
-    assert.ok(!homepage.includes('GeForce NOW'));
-    assert.ok(!homepage.includes('Xbox Cloud Gaming'));
-    assert.ok(!homepage.includes('GamePottys'));
-    assert.ok(!homepage.includes('CrazyGames'));
-    assert.ok(!homepage.includes('Poki'));
-    assert.ok(!homepage.includes('Cloud Gaming'));
-    assert.ok(!homepage.includes('Retro &amp; Portals'));
-  } finally {
-    await close(limitedProxy);
-    await close(upstream);
+    await close(restrictedProxy);
   }
 });

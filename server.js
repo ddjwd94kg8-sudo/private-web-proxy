@@ -35,6 +35,12 @@ const proxyClientCss = '.private-proxy-home{position:fixed;z-index:2147483647;to
 
 const quickLaunchGroups = [
   {
+    title: 'Search Engine',
+    bookmarks: [
+      { label: 'DuckDuckGo', url: 'https://duckduckgo.com' }
+    ]
+  },
+  {
     title: 'Cloud Gaming',
     bookmarks: [
       { label: 'GeForce NOW', url: 'https://geforcenow.com' },
@@ -48,14 +54,12 @@ const quickLaunchGroups = [
       { label: 'CrazyGames', url: 'https://crazygames.com' },
       { label: 'Poki', url: 'https://poki.com' }
     ]
-  },
-  {
-    title: 'Search Engine',
-    bookmarks: [
-      { label: 'DuckDuckGo', url: 'https://duckduckgo.com' }
-    ]
   }
 ];
+
+const defaultAllowedOrigins = quickLaunchGroups.flatMap(({ bookmarks }) =>
+  bookmarks.map(({ url }) => new URL(url).origin)
+);
 
 function renderQuickLaunchBookmarks(allowedOrigins) {
   const allowed = new Set(allowedOrigins.map((origin) => new URL(origin).origin));
@@ -88,7 +92,7 @@ function configuration(environment = process.env) {
     throw new Error('TARGET_URL must use HTTPS (local HTTP is allowed only outside production)');
   }
 
-  const allowedOrigins = new Set([target.origin, 'https://duckduckgo.com']);
+  const allowedOrigins = new Set([target.origin, ...defaultAllowedOrigins]);
   for (const value of (environment.PROXY_ALLOWED_ORIGINS || '').split(',')) {
     const candidate = value.trim();
     if (!candidate) continue;
